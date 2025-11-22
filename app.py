@@ -1,25 +1,14 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, make_response
-from flask_jwt_extended import (
-    JWTManager, create_access_token, create_refresh_token, 
-    jwt_required, get_jwt_identity, set_access_cookies, 
-    set_refresh_cookies, unset_jwt_cookies, decode_token
-)
+from flask import Flask, render_template, request, redirect, url_for, flash
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_bcrypt import Bcrypt
 from functools import wraps
-from datetime import timedelta
 
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'  # Change this in production
 
-# JWT Configuration
-app.config['JWT_SECRET_KEY'] = 'jwt-secret-string'  # Change this!
-app.config['JWT_TOKEN_LOCATION'] = ['cookies']
-app.config['JWT_COOKIE_CSRF_PROTECT'] = False  # Disabled for simplicity in this demo
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(seconds=15)
-app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=30)
-
 bcrypt = Bcrypt(app)
-jwt = JWTManager(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
 
 # In-memory database
 # Passwords are: adminpassword, userpassword
@@ -27,6 +16,19 @@ users = [
     {'id': 1, 'username': 'admin', 'password': bcrypt.generate_password_hash('adminpassword').decode('utf-8'), 'role': 'admin'},
     {'id': 2, 'username': 'user', 'password': bcrypt.generate_password_hash('userpassword').decode('utf-8'), 'role': 'user'}
 ]
+
+class User(UserMixin):
+    def __init__(self, user_data):
+        self.id = str(user_data['id'])
+        self.username = user_data['username']
+        self.role = user_data['role']
+
+@login_manager.user_loader
+def load_user(user_id):
+    user_data = get_user_by_id(int(user_id))
+    if user_data:
+        return User(user_data)
+    return None
 
 def get_user(username):
     for user in users:
@@ -43,29 +45,10 @@ def get_user_by_id(user_id):
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        current_username = get_jwt_identity()
-        user = get_user(current_username)
-        if not user or user['role'] != 'admin':
+        if not current_user.is_authenticated or current_user.role != 'admin':
             return "Forbidden", 403
         return f(*args, **kwargs)
     return decorated_function
-
-@jwt.expired_token_loader
-def my_expired_token_callback(jwt_header, jwt_payload):
-    refresh_token = request.cookies.get('refresh_token_cookie')
-    if refresh_token:
-        try:
-            decoded_token = decode_token(refresh_token)
-            identity = decoded_token['sub']
-            access_token = create_access_token(identity=identity)
-            resp = make_response(redirect(request.url))
-            set_access_cookies(resp, access_token)
-            return resp
-        except Exception:
-            pass
-    
-    flash('Session expired, please login again.')
-    return redirect(url_for('login'))
 
 @app.route('/')
 def index():
@@ -78,37 +61,30 @@ def login():
         password = request.form['password']
         user_data = get_user(username)
         if user_data and bcrypt.check_password_hash(user_data['password'], password):
-            access_token = create_access_token(identity=username)
-            refresh_token = create_refresh_token(identity=username)
-            resp = make_response(redirect(url_for('dashboard')))
-            set_access_cookies(resp, access_token)
-            set_refresh_cookies(resp, refresh_token)
-            return resp
+            user = User(user_data)
+            login_user(user)
+            return redirect(url_for('dashboard'))
         flash('Invalid credentials')
     return render_template('login.html')
 
 @app.route('/logout')
+@login_required
 def logout():
-    resp = make_response(redirect(url_for('login')))
-    unset_jwt_cookies(resp)
-    return resp
+    logout_user()
+    return redirect(url_for('login'))
 
 @app.route('/dashboard')
-@jwt_required()
+@login_required
 def dashboard():
-    current_username = get_jwt_identity()
-    user = get_user(current_username)
-    return render_template('dashboard.html', user=user)
+    return render_template('dashboard.html', user=current_user)
 
 @app.route('/profile')
-@jwt_required()
+@login_required
 def profile():
-    current_username = get_jwt_identity()
-    user = get_user(current_username)
-    return render_template('profile.html', user=user)
+    return render_template('profile.html', user=current_user)
 
 @app.route('/users', methods=['GET', 'POST'])
-@jwt_required()
+@login_required
 @admin_required
 def users_page():
     if request.method == 'POST':
